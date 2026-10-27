@@ -89,7 +89,8 @@ Every setting but `ZARR_WRITER_TIMEZONE` is optional.
 | `ZARR_WRITER_INNER_LEN` | inner Zarr chunk length in samples | 1 or more | 8192 |
 | `ZARR_WRITER_TARGET_SHARD_BYTES` | target outer shard size in bytes | 1 or more | 16 MiB |
 | `ZARR_WRITER_VAR` | write the per-bin variance member | 0 or 1 | 0 |
-| `ZARR_WRITER_SWEEP_BYTES` | memory in bytes for the raw shards held during one pass over the records | 1 or more | 2 GiB |
+| `ZARR_WRITER_MAX_WORKERS` | threads that fold and encode the channels of a window | 1 or more | available CPUs |
+| `ZARR_WRITER_SWEEP_BYTES` | memory in bytes for the channel writers and their windows during one pass over the records | 1 or more | 2 GiB |
 
 `ZARR_WRITER_VAR` sets the library's `write_var` option.
 [The library README](https://github.com/Pennsieve/timeseries-zarr-py#usage) describes what
@@ -97,12 +98,12 @@ it writes and what it costs in memory.
 
 ## Memory
 
-A pass over the records holds one raw shard per channel plus a window of float32
+A pass over the records holds one writer per channel plus the windows of float32
 samples decoded from at most 8 MiB of records. The converter makes one pass per
-group of channels whose raw shards fit in `ZARR_WRITER_SWEEP_BYTES`. Each group
-re-reads the file. At the default shard size and sweep bytes, a group holds
-128 channels. A 23 hour, 807 MB file of 25 channels converts with a peak
-resident set of about 1.1 GB.
+group of channels whose writers fit in `ZARR_WRITER_SWEEP_BYTES`, after it reserves
+144 MiB for the windows. Each group re-reads the file. Each channel writer holds up
+to 5.8 MiB at the defaults, so a group holds 329 channels and a file of that width
+or less is read once.
 
 ## Known limitations
 

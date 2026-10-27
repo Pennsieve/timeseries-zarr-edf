@@ -6,16 +6,23 @@ from pathlib import Path
 from typing import Final
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from timeseries_zarr import MAX_LEVELS, WriteOpts
+from timeseries_zarr import (
+    MAX_LEVELS,
+    WINDOW_BATCH_BYTES,
+    WriteOpts,
+    channel_writer_bytes,
+)
+
+from timeseries_zarr_edf.edf_reader import WINDOW_BYTES
 
 MAX_ZSTD_LEVEL: Final = 22
 """Highest Zstd compression level the codec accepts."""
 
 DEFAULT_SWEEP_BYTES: Final = 2 * 2**30
-"""Default bytes of raw shards held while one group of channels is read."""
+"""Default bytes of memory for the writers and windows of one group of channels."""
 
-RAW_SAMPLE_BYTES: Final = 4
-"""Bytes of one raw sample, which a bundle stores as float32."""
+WINDOW_RESERVE_BYTES: Final = 2 * (WINDOW_BATCH_BYTES + WINDOW_BYTES)
+"""Bytes the sweep reserves for the two batches of windows that the writer holds."""
 
 SUBJECT_FIELDS: Final = ("code", "sex", "birthdate", "name")
 """EDF+ patient sub-fields that ZARR_WRITER_SUBJECT_FIELDS may name."""
@@ -34,8 +41,8 @@ class Config:
         opts: Writer settings.
         timezone: Zone that places the EDF start time, which has no zone.
         subject_fields: Patient sub-fields written to recording.json.
-        sweep_bytes: Bound on the raw shards held while one group of channels
-            is read.
+        sweep_bytes: Bound on the memory of the channel writers and the two
+            batches of windows while one group of channels is written.
     """
 
     edf_path: Path
@@ -46,20 +53,14 @@ class Config:
     sweep_bytes: int = DEFAULT_SWEEP_BYTES
 
     @property
-    def raw_shard_bytes(self) -> int:
-        """The most bytes one raw shard of a channel holds under opts.
-
-        A shard holds the whole inner chunks that fit in target_shard_bytes,
-        and at least one.
-        """
-        chunk_bytes = self.opts.inner_len * RAW_SAMPLE_BYTES
-        chunks = max(1, self.opts.target_shard_bytes // chunk_bytes)
-        return chunks * chunk_bytes
-
-    @property
     def sweep_channels(self) -> int:
-        """The most channels whose raw shards fit in sweep_bytes, at least 1."""
-        return max(1, self.sweep_bytes // self.raw_shard_bytes)
+        """The most channels whose writers fit in sweep_bytes, at least 1.
+
+        The budget is sweep_bytes less WINDOW_RESERVE_BYTES. Each channel
+        costs channel_writer_bytes under opts.
+        """
+        budget = self.sweep_bytes - WINDOW_RESERVE_BYTES
+        return max(1, budget // channel_writer_bytes(self.opts))
 
 
 def load_config(env: Mapping[str, str], argv: Sequence[str]) -> Config:
@@ -71,8 +72,9 @@ def load_config(env: Mapping[str, str], argv: Sequence[str]) -> Config:
     ZARR_WRITER_ZSTD_LEVEL takes 0 through MAX_ZSTD_LEVEL.
     ZARR_WRITER_MAX_LEVELS takes 0 through MAX_LEVELS, and 0 writes raw
     samples only. ZARR_WRITER_MIN_BINS, ZARR_WRITER_INNER_LEN,
-    ZARR_WRITER_TARGET_SHARD_BYTES, and ZARR_WRITER_SWEEP_BYTES take 1 or
-    more, and ZARR_WRITER_SWEEP_BYTES defaults to DEFAULT_SWEEP_BYTES.
+    ZARR_WRITER_TARGET_SHARD_BYTES, ZARR_WRITER_SWEEP_BYTES, and
+    ZARR_WRITER_MAX_WORKERS take 1 or more. ZARR_WRITER_SWEEP_BYTES defaults
+    to DEFAULT_SWEEP_BYTES, and ZARR_WRITER_MAX_WORKERS to the CPUs available.
     ZARR_WRITER_VAR takes 0 or 1. ZARR_WRITER_TIMEZONE is required and takes an
     IANA zone name. ZARR_WRITER_SUBJECT_FIELDS takes a comma-separated list of
     SUBJECT_FIELDS names, defaults to DEFAULT_SUBJECT_FIELDS, and an empty
@@ -83,6 +85,11 @@ def load_config(env: Mapping[str, str], argv: Sequence[str]) -> Config:
     edf_path, output_path = _resolve_paths(argv)
 
     defaults = WriteOpts()
+    max_workers = (
+        _int_env(env, "ZARR_WRITER_MAX_WORKERS", 1, 1)
+        if "ZARR_WRITER_MAX_WORKERS" in env
+        else defaults.max_workers
+    )
     opts = WriteOpts(
         zstd_level=_int_env(
             env,
@@ -103,6 +110,7 @@ def load_config(env: Mapping[str, str], argv: Sequence[str]) -> Config:
             1,
         ),
         write_var=_flag_env(env, "ZARR_WRITER_VAR", defaults.write_var),
+        max_workers=max_workers,
     )
 
     return Config(

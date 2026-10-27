@@ -4,11 +4,12 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
-from timeseries_zarr import MAX_LEVELS, WriteOpts
+from timeseries_zarr import MAX_LEVELS, WriteOpts, channel_writer_bytes
 
 from timeseries_zarr_edf.config import (
     DEFAULT_SWEEP_BYTES,
     MAX_ZSTD_LEVEL,
+    WINDOW_RESERVE_BYTES,
     Config,
     load_config,
 )
@@ -147,57 +148,60 @@ def test_sweep_bytes_rejects_a_value_that_is_not_a_positive_integer(
         load_config({**ENV, "ZARR_WRITER_SWEEP_BYTES": value}, ARGV)
 
 
-def test_raw_shard_bytes_is_the_whole_chunks_that_fit_in_the_target() -> None:
-    cfg = load_config(
-        {
-            **ENV,
-            "ZARR_WRITER_INNER_LEN": "100",
-            "ZARR_WRITER_TARGET_SHARD_BYTES": "3000",
-        },
-        ARGV,
-    )
-    assert cfg.raw_shard_bytes == 7 * 100 * 4
+def test_max_workers_defaults_to_the_library_default() -> None:
+    assert load_config(ENV, ARGV).opts.max_workers is None
 
 
-def test_raw_shard_bytes_is_one_chunk_when_a_chunk_exceeds_the_target() -> None:
-    cfg = load_config(
-        {
-            **ENV,
-            "ZARR_WRITER_INNER_LEN": "16777216",
-            "ZARR_WRITER_TARGET_SHARD_BYTES": "4096",
-        },
-        ARGV,
-    )
-    assert cfg.raw_shard_bytes == 16777216 * 4
+def test_max_workers_follows_its_variable() -> None:
+    cfg = load_config({**ENV, "ZARR_WRITER_MAX_WORKERS": "4"}, ARGV)
+    assert cfg.opts.max_workers == 4
 
 
-def test_sweep_channels_is_the_raw_shards_that_fit_in_the_sweep_budget() -> (
+@pytest.mark.parametrize("value", ["0", "-1", "two", "", "1.5"])
+def test_max_workers_rejects_a_value_that_is_not_a_positive_integer(
+    value: str,
+) -> None:
+    with pytest.raises(ValueError, match="ZARR_WRITER_MAX_WORKERS"):
+        load_config({**ENV, "ZARR_WRITER_MAX_WORKERS": value}, ARGV)
+
+
+def test_sweep_channels_is_the_channel_writers_that_fit_after_the_windows() -> (
     None
 ):
+    opts = WriteOpts(max_levels=3)
+    per_channel = channel_writer_bytes(opts)
+    budget = WINDOW_RESERVE_BYTES + 5 * per_channel + per_channel - 1
     cfg = load_config(
         {
             **ENV,
-            "ZARR_WRITER_SWEEP_BYTES": "10000",
-            "ZARR_WRITER_INNER_LEN": "100",
-            "ZARR_WRITER_TARGET_SHARD_BYTES": "3000",
+            "ZARR_WRITER_SWEEP_BYTES": str(budget),
+            "ZARR_WRITER_MAX_LEVELS": "3",
         },
         ARGV,
     )
-    assert cfg.sweep_channels == 3
+    assert cfg.sweep_channels == 5
 
 
-def test_sweep_channels_counts_a_chunk_larger_than_the_target_shard() -> None:
-    cfg = load_config({**ENV, "ZARR_WRITER_INNER_LEN": "16777216"}, ARGV)
-    assert cfg.sweep_channels == DEFAULT_SWEEP_BYTES // (16777216 * 4)
+def test_sweep_channels_follows_the_writer_settings() -> None:
+    narrow = load_config({**ENV, "ZARR_WRITER_MAX_LEVELS": "2"}, ARGV)
+    wide = load_config({**ENV, "ZARR_WRITER_MAX_LEVELS": "12"}, ARGV)
+    assert narrow.sweep_channels > wide.sweep_channels
+    short = load_config({**ENV, "ZARR_WRITER_INNER_LEN": "1024"}, ARGV)
+    assert short.sweep_channels > load_config(ENV, ARGV).sweep_channels
 
 
-def test_sweep_channels_is_one_when_the_budget_is_below_one_shard() -> None:
+def test_sweep_channels_is_one_when_the_budget_is_below_the_windows() -> None:
     cfg = load_config({**ENV, "ZARR_WRITER_SWEEP_BYTES": "100"}, ARGV)
     assert cfg.sweep_channels == 1
 
 
-def test_the_default_sweep_holds_128_channels_of_default_shards() -> None:
-    assert load_config(ENV, ARGV).sweep_channels == 128
+def test_the_default_sweep_holds_the_channels_of_a_wide_recording() -> None:
+    cfg = load_config(ENV, ARGV)
+    expected = (DEFAULT_SWEEP_BYTES - WINDOW_RESERVE_BYTES) // (
+        channel_writer_bytes(cfg.opts)
+    )
+    assert cfg.sweep_channels == expected
+    assert cfg.sweep_channels >= 256
 
 
 def test_an_unset_timezone_raises_naming_the_variable() -> None:
