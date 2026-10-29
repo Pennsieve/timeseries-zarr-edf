@@ -45,8 +45,8 @@ duration, and a label for each distinct text. A file without annotations gets
 no event channel.
 
 Each segment of an EDF+D file is one run. The converter places a run at the
-grid sample nearest its onset and fills the pause before it with NaN. The
-a channel of two or more runs gets a `runs` array that holds the exact onset of
+grid sample nearest its onset and fills the pause before it with NaN. A
+channel of two or more runs gets a `runs` array that holds the exact onset of
 each run in microseconds from the reference time. A segment may start at any
 time, including one that is not a multiple of the sample period.
 

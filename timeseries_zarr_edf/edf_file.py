@@ -20,10 +20,7 @@ from timeseries_zarr_edf.edf_header import (
 logger = logging.getLogger(__name__)
 
 ONSET_TOLERANCE_S: Final = 1e-6
-"""Seconds by which a record step may differ from the record duration.
-
-Also the seconds by which a segment onset may differ from a sample instant.
-"""
+"""Seconds by which a record step may differ from the record duration."""
 
 MAX_TAL_BYTES: Final = 65536
 """Largest time-stamped annotation list, in bytes, the parser accepts."""
