@@ -24,8 +24,6 @@ DEFAULT_LEVEL_CAP = max_levels_for(DEFAULT_DECIMATION_FACTOR)
 ARGV = ["in.edf", "out_bundle"]
 ENV = {"ZARR_WRITER_TIMEZONE": "UTC"}
 
-MAX_LEVELS = max_levels_for(WriteOpts().decimation_factor)
-
 
 def test_two_positionals_populate_paths() -> None:
     cfg = load_config(ENV, ["in.edf", "out_bundle"])
