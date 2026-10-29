@@ -151,6 +151,8 @@ def test_main_stores_a_fractional_first_stamp_of_an_edf_d_file(
     assert raw.shape == (28,)
     assert not np.isnan(raw[:8]).any()
     assert np.isnan(raw[8:20]).all()
+    assert channel.runs is not None
+    assert channel.runs.tolist() == [[0, 8, 370_000], [20, 8, 5_370_000]]
 
 
 def test_main_writes_nan_in_the_gap_of_an_edf_d_file(tmp_path: Path) -> None:
@@ -165,11 +167,47 @@ def test_main_writes_nan_in_the_gap_of_an_edf_d_file(tmp_path: Path) -> None:
     )
     out = tmp_path / "x.zarr"
     assert main([str(path), str(out)]) == 0
-    raw = np.asarray(open_bundle(out).continuous[0].raw[:])
+    channel = open_bundle(out).continuous[0]
+    raw = np.asarray(channel.raw[:])
     assert raw.shape == (28,)
     assert np.isnan(raw[8:20]).all()
     np.testing.assert_array_equal(raw[:8], np.arange(8))
     np.testing.assert_array_equal(raw[20:], np.arange(8, 16))
+    assert channel.runs is not None
+    assert channel.runs.tolist() == [[0, 8, 0], [20, 8, 5_000_000]]
+
+
+def test_main_converts_a_segment_that_starts_off_the_sample_grid(
+    tmp_path: Path,
+) -> None:
+    signals: list[SignalSpec] = [("A", "uV", -100.0, 100.0, -100, 100, 3)]
+    records = [[np.arange(3, dtype=np.int16) + 3 * k] for k in range(2)]
+    path = make(
+        tmp_path,
+        signals=signals,
+        records=records,
+        flavor="EDF+D",
+        record_onsets=[0.0, 2.1],
+    )
+    out = tmp_path / "x.zarr"
+    assert main([str(path), str(out)]) == 0
+    channel = open_bundle(out).continuous[0]
+    raw = np.asarray(channel.raw[:])
+    assert channel.offset_us == 0
+    assert channel.runs is not None
+    assert channel.runs.tolist() == [[0, 3, 0], [6, 3, 2_100_000]]
+    np.testing.assert_array_equal(raw[:3], np.arange(3))
+    assert np.isnan(raw[3:6]).all()
+    np.testing.assert_array_equal(raw[6:], np.arange(3, 6))
+    record_onsets_us = [0, 2_100_000]
+    expected_us = [
+        onset + k * 1_000_000 / 3
+        for onset in record_onsets_us
+        for k in range(3)
+    ]
+    time_us = channel.read().time_us
+    recorded = [0, 1, 2, 6, 7, 8]
+    np.testing.assert_allclose(time_us[recorded], expected_us, atol=1e-3)
 
 
 def test_main_writes_the_annotations_as_one_event_channel(

@@ -4,7 +4,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
-from timeseries_zarr import MAX_LEVELS, WriteOpts, channel_writer_bytes
+from timeseries_zarr import WriteOpts, channel_writer_bytes, max_levels_for
 
 from timeseries_zarr_edf.config import (
     DEFAULT_SWEEP_BYTES,
@@ -16,6 +16,8 @@ from timeseries_zarr_edf.config import (
 
 ARGV = ["in.edf", "out_bundle"]
 ENV = {"ZARR_WRITER_TIMEZONE": "UTC"}
+
+MAX_LEVELS = max_levels_for(WriteOpts().decimation_factor)
 
 
 def test_two_positionals_populate_paths() -> None:

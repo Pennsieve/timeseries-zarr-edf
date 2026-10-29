@@ -14,6 +14,8 @@ from timeseries_zarr import (
     ContinuousChannelMetadata,
     EventChannelSource,
     MultiChannelSource,
+    Run,
+    RunsSource,
 )
 
 from tests.conftest import SignalSpec, build_edf
@@ -25,7 +27,7 @@ from timeseries_zarr_edf.edf_reader import (
     EdfChannel,
     EdfRecordSource,
     build_sources_from_edf,
-    channel_layout,
+    channel_runs,
     recording_meta,
     start_us,
 )
@@ -214,6 +216,7 @@ def test_sources_satisfy_the_writer_protocols(tmp_path: Path) -> None:
         assert isinstance(source, MultiChannelSource)
         for channel in source.channels():
             assert isinstance(channel, ContinuousChannelMetadata)
+            assert isinstance(channel, RunsSource)
     for event in sources.events:
         assert isinstance(event, EventChannelSource)
 
@@ -260,52 +263,47 @@ def test_a_record_larger_than_the_window_still_reads_one_record(
     assert sizes == [4] * 5
 
 
-def test_a_gap_is_nan_and_samples_land_at_the_onset(
+def test_a_pause_adds_no_sample_and_each_segment_is_a_run(
     tmp_path: Path,
 ) -> None:
     with EdfFile.open(make_gapped(tmp_path)) as edf:
         (source,) = build(edf).continuous
         a, b = collect(source)
+        header_start = start_us(edf.header, UTC_ZONE)
         expected_a = np.concatenate(
-            [
-                edf.read_physical(0, 0, 2),
-                np.full(12, np.nan, dtype=np.float32),
-                edf.read_physical(0, 2, 4),
-            ]
+            [edf.read_physical(0, 0, 2), edf.read_physical(0, 2, 4)]
         )
         expected_b = np.concatenate(
-            [
-                edf.read_physical(1, 0, 2),
-                np.full(6, np.nan, dtype=np.float32),
-                edf.read_physical(1, 2, 4),
-            ]
+            [edf.read_physical(1, 0, 2), edf.read_physical(1, 2, 4)]
         )
     np.testing.assert_array_equal(a, expected_a)
     np.testing.assert_array_equal(b, expected_b)
+    assert not np.isnan(a).any()
     assert [c.num_samples() for c in source.channels()] == [len(a), len(b)]
-    assert (len(a), len(b)) == (28, 14)
+    assert (len(a), len(b)) == (16, 8)
+    runs_a, runs_b = (c.runs() for c in source.channels())
+    assert runs_a == [
+        Run(header_start, 8),
+        Run(header_start + 5_000_000, 8),
+    ]
+    assert runs_b == [
+        Run(header_start, 4),
+        Run(header_start + 5_000_000, 4),
+    ]
 
 
-def test_a_gap_is_cut_into_windows_of_the_records_per_window(
+def test_windows_follow_the_records_per_window_and_skip_the_pause(
     tmp_path: Path,
 ) -> None:
     with EdfFile.open(make_gapped(tmp_path)) as edf:
         channels = build(edf).continuous[0].channels()
         source = EdfRecordSource(edf, [0, 1], channels, records_per_window=1)
         windows = list(source.iter_windows())
-    assert [[len(b) for b in w] for w in windows] == [[4, 2]] * 7
-    assert [bool(np.isnan(w[0]).all()) for w in windows] == [
-        False,
-        False,
-        True,
-        True,
-        True,
-        False,
-        False,
-    ]
+    assert [[len(b) for b in w] for w in windows] == [[4, 2]] * 4
+    assert not any(np.isnan(w[0]).any() for w in windows)
 
 
-def test_gap_blocks_scale_with_the_samples_per_record_of_each_channel(
+def test_runs_scale_with_the_samples_per_record_of_each_channel(
     tmp_path: Path,
 ) -> None:
     signals: list[SignalSpec] = [
@@ -327,31 +325,37 @@ def test_gap_blocks_scale_with_the_samples_per_record_of_each_channel(
         channels = build(edf).continuous[0].channels()
         source = EdfRecordSource(edf, [0, 1], channels, records_per_window=1)
         sizes = [[len(b) for b in w] for w in source.iter_windows()]
-        layouts = [channel_layout(edf, s) for s in (0, 1)]
-    assert sizes == [[1, 4], [1, 4], [1, 4], [1, 4]]
-    assert layouts[0][1] == 4
-    assert layouts[1][1] == 16
+        header_start = start_us(edf.header, UTC_ZONE)
+    assert sizes == [[1, 4], [1, 4]]
+    assert [r.num_samples for r in channels[0].runs()] == [1, 1]
+    assert [r.num_samples for r in channels[1].runs()] == [4, 4]
+    assert [r.start_us for r in channels[1].runs()] == [
+        header_start,
+        header_start + 3_000_000,
+    ]
 
 
-def test_channel_layout_of_a_continuous_file_is_one_segment(
-    tmp_path: Path,
-) -> None:
+def test_channel_runs_of_a_continuous_file_is_one_run(tmp_path: Path) -> None:
     with EdfFile.open(make(tmp_path)) as edf:
-        assert channel_layout(edf, 0) == ([(0, 0, 5)], 20)
-        assert channel_layout(edf, 1) == ([(0, 0, 5)], 10)
+        assert channel_runs(edf, 0, 1_000) == [Run(1_000, 20)]
+        assert channel_runs(edf, 1, 1_000) == [Run(1_000, 10)]
 
 
-def test_channel_layout_of_several_segments_gives_the_gaps(
-    tmp_path: Path,
-) -> None:
+def test_channel_runs_gives_one_run_for_each_segment(tmp_path: Path) -> None:
     with EdfFile.open(make_gapped(tmp_path)) as edf:
-        assert channel_layout(edf, 0) == ([(0, 0, 2), (12, 2, 2)], 28)
-        assert channel_layout(edf, 1) == ([(0, 0, 2), (6, 2, 2)], 14)
+        assert channel_runs(edf, 0, 1_000) == [
+            Run(1_000, 8),
+            Run(5_001_000, 8),
+        ]
+        assert channel_runs(edf, 1, 1_000) == [
+            Run(1_000, 4),
+            Run(5_001_000, 4),
+        ]
 
 
-def test_channel_layout_of_an_empty_file_is_empty(tmp_path: Path) -> None:
+def test_channel_runs_of_an_empty_file_is_empty(tmp_path: Path) -> None:
     with EdfFile.open(make(tmp_path, n=0)) as edf:
-        assert channel_layout(edf, 0) == ([], 0)
+        assert channel_runs(edf, 0, 1_000) == []
 
 
 def make_single_signal_gapped(
@@ -371,35 +375,35 @@ def make_single_signal_gapped(
     )
 
 
-def test_channel_layout_rejects_a_segment_start_off_the_sample_grid(
+def test_channel_runs_keeps_a_segment_start_off_the_sample_grid(
     tmp_path: Path,
 ) -> None:
     path = make_single_signal_gapped(tmp_path, 3, [0.0, 2.1])
-    with (
-        EdfFile.open(path) as edf,
-        pytest.raises(EdfFormatError, match="sample period"),
-    ):
-        channel_layout(edf, 0)
+    with EdfFile.open(path) as edf:
+        assert channel_runs(edf, 0, 0) == [Run(0, 3), Run(2_100_000, 3)]
 
 
-def test_channel_layout_accepts_an_onset_within_the_tolerance(
+def test_channel_runs_rounds_an_onset_to_a_microsecond(
     tmp_path: Path,
 ) -> None:
     onset = 2.3 + ONSET_TOLERANCE_S / 10
     path = make_single_signal_gapped(tmp_path, 10, [0.0, onset])
     with EdfFile.open(path) as edf:
-        assert channel_layout(edf, 0) == ([(0, 0, 1), (13, 1, 1)], 33)
+        assert channel_runs(edf, 0, 0) == [Run(0, 10), Run(2_300_000, 10)]
 
 
-def test_build_sources_rejects_a_segment_start_off_the_sample_grid(
+def test_build_sources_accepts_a_segment_start_off_the_sample_grid(
     tmp_path: Path,
 ) -> None:
     path = make_single_signal_gapped(tmp_path, 3, [0.0, 2.1])
-    with (
-        EdfFile.open(path) as edf,
-        pytest.raises(EdfFormatError, match="sample period"),
-    ):
-        build(edf)
+    with EdfFile.open(path) as edf:
+        (channel,) = channel_list(build(edf))
+        header_start = start_us(edf.header, UTC_ZONE)
+    assert channel.runs() == [
+        Run(header_start, 3),
+        Run(header_start + 2_100_000, 3),
+    ]
+    assert channel.num_samples() == 6
 
 
 def test_grouping_into_sweeps_keeps_channel_order_and_values(
@@ -588,7 +592,9 @@ def test_a_fractional_first_stamp_moves_the_channel_start(
         channels = channel_list(sources)
         (source,) = sources.continuous
         a, _ = collect(source)
-        assert channel_layout(edf, 0) == ([(0, 0, 4)], 16)
+        assert channel_runs(edf, 0, header_start) == [
+            Run(header_start + 370_000, 16)
+        ]
         (event,) = sources.events
     assert [c.start_us() for c in channels] == [header_start + 370_000] * 2
     assert [c.num_samples() for c in channels] == [16, 8]
@@ -616,7 +622,7 @@ def test_a_first_stamp_of_one_second_or_more_warns_and_still_applies(
     assert "more than the fraction of a second" in caplog.text
 
 
-def test_channel_layout_grids_edf_d_segments_from_the_first_record(
+def test_channel_runs_places_edf_d_segments_after_the_first_stamp(
     tmp_path: Path,
 ) -> None:
     path = make(
@@ -626,16 +632,22 @@ def test_channel_layout_grids_edf_d_segments_from_the_first_record(
         record_onsets=[0.37, 1.37, 5.37, 6.37],
     )
     with EdfFile.open(path) as edf:
-        assert channel_layout(edf, 0) == ([(0, 0, 2), (12, 2, 2)], 28)
-        assert channel_layout(edf, 1) == ([(0, 0, 2), (6, 2, 2)], 14)
+        assert channel_runs(edf, 0, 0) == [
+            Run(370_000, 8),
+            Run(5_370_000, 8),
+        ]
+        assert channel_runs(edf, 1, 0) == [
+            Run(370_000, 4),
+            Run(5_370_000, 4),
+        ]
 
 
-def test_channel_layout_rejects_a_later_segment_off_the_grid_of_the_first(
+def test_channel_runs_keeps_a_later_segment_off_the_grid_of_the_first(
     tmp_path: Path,
 ) -> None:
     path = make_single_signal_gapped(tmp_path, 3, [0.37, 2.47])
-    with (
-        EdfFile.open(path) as edf,
-        pytest.raises(EdfFormatError, match="sample period"),
-    ):
-        channel_layout(edf, 0)
+    with EdfFile.open(path) as edf:
+        assert channel_runs(edf, 0, 0) == [
+            Run(370_000, 3),
+            Run(2_470_000, 3),
+        ]
