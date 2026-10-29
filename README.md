@@ -44,9 +44,11 @@ EDF+ annotations become one event channel named `annotations` with the text, the
 duration, and a label for each distinct text. A file without annotations gets
 no event channel.
 
-The converter fills EDF+D gaps with NaN values. It rejects a file when a
-segment's start is misaligned with the signal's sample period by more than one
-microsecond.
+Each segment of an EDF+D file is one run. The converter places a run at the
+grid sample nearest its onset and fills the pause before it with NaN. A
+channel of two or more runs gets a `runs` array that holds the exact onset of
+each run in microseconds from the reference time. A segment may start at any
+time, including one that is not a multiple of the sample period.
 
 Each channel's provenance holds the file variant (EDF, EDF+C, or EDF+D),
 the signal index, the physical and digital ranges, and the transducer and
