@@ -155,6 +155,65 @@ def test_an_unset_max_levels_writes_every_level_the_factor_allows() -> None:
     assert cfg.opts.level_cap == max_levels_for(2)
 
 
+def test_the_continuous_factor_takes_one_integer() -> None:
+    cfg = load_config(
+        {**ENV, "ZARR_WRITER_CONTINUOUS_DECIMATION_FACTOR": "8"}, ARGV
+    )
+    assert cfg.opts.continuous_decimation_factor == 8
+    assert cfg.opts.decimation_factor == DEFAULT_DECIMATION_FACTOR
+
+
+def test_the_continuous_factor_takes_a_ladder() -> None:
+    cfg = load_config(
+        {**ENV, "ZARR_WRITER_CONTINUOUS_DECIMATION_FACTOR": "8, 4"}, ARGV
+    )
+    assert cfg.opts.continuous_decimation_factor == (8, 4)
+    assert cfg.opts.continuous_factors == (8, 4)
+
+
+def test_the_event_factor_follows_its_variable() -> None:
+    cfg = load_config({**ENV, "ZARR_WRITER_EVENT_DECIMATION_FACTOR": "3"}, ARGV)
+    assert cfg.opts.event_decimation_factor == 3
+    assert cfg.opts.event_factor == 3
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        ("1", "entries must be 2 or more, got 1"),
+        ("8,1", "entries must be 2 or more, got 1"),
+        ("", "must be integers separated by commas, got ''"),
+        ("8,x", "must be integers separated by commas, got '8,x'"),
+        ("8,", "must be integers separated by commas, got '8,'"),
+    ],
+)
+def test_the_continuous_factor_rejects_a_bad_ladder(
+    value: str, message: str
+) -> None:
+    key = "ZARR_WRITER_CONTINUOUS_DECIMATION_FACTOR"
+    with pytest.raises(ValueError, match=f"^{key} {message}$"):
+        load_config({**ENV, key: value}, ARGV)
+
+
+def test_the_event_factor_rejects_a_value_below_the_minimum() -> None:
+    key = "ZARR_WRITER_EVENT_DECIMATION_FACTOR"
+    with pytest.raises(ValueError, match=f"^{key} must be 2 or more, got 1$"):
+        load_config({**ENV, key: "1"}, ARGV)
+
+
+def test_the_max_levels_range_follows_the_larger_factor_limit() -> None:
+    cap = max(max_levels_for((2, 3)), max_levels_for(10))
+    env = {
+        **ENV,
+        "ZARR_WRITER_CONTINUOUS_DECIMATION_FACTOR": "2,3",
+        "ZARR_WRITER_EVENT_DECIMATION_FACTOR": "10",
+    }
+    cfg = load_config({**env, "ZARR_WRITER_MAX_LEVELS": str(cap)}, ARGV)
+    assert cfg.opts.max_levels == cap
+    with pytest.raises(ValueError, match=f"to {cap}, got {cap + 1}$"):
+        load_config({**env, "ZARR_WRITER_MAX_LEVELS": str(cap + 1)}, ARGV)
+
+
 @pytest.mark.parametrize(
     "argv", [[], ["in.edf"], ["in.edf", "out_bundle", "extra"]]
 )
