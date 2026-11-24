@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import numpy.typing as npt
 import pytest
-from timeseries_zarr import open_bundle
+from timeseries_zarr import open_bundle, validate_bundle
 
 from tests.conftest import SignalSpec, build_edf
 from timeseries_zarr_edf.main import main, run
@@ -32,6 +32,11 @@ def clean_environment(monkeypatch: pytest.MonkeyPatch) -> None:
         "ZARR_WRITER_SWEEP_BYTES",
         "ZARR_WRITER_VAR",
         "ZARR_WRITER_INNER_LEN",
+        "ZARR_WRITER_CONTINUOUS_DECIMATION_FACTOR",
+        "ZARR_WRITER_EVENT_DECIMATION_FACTOR",
+        "ZARR_WRITER_DECIMATION_FACTOR",
+        "ZARR_WRITER_MAX_LEVELS",
+        "ZARR_WRITER_MIN_BINS",
     ):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("ZARR_WRITER_TIMEZONE", "UTC")
@@ -226,6 +231,63 @@ def test_main_writes_the_annotations_as_one_event_channel(
     assert table.duration_us is not None
     assert table.duration_us.tolist() == [1_500_000, 0]
     assert table.label_name == ["wake", "rem"]
+
+
+def test_main_writes_a_bundle_that_passes_full_validation(
+    tmp_path: Path,
+) -> None:
+    path = make(tmp_path, annotations=[(2.0, 1.5, "wake"), (4.0, None, "rem")])
+    out = tmp_path / "x.zarr"
+    assert main([str(path), str(out)]) == 0
+    assert validate_bundle(out, full=True) == []
+
+
+def test_main_writes_an_edf_d_bundle_that_passes_full_validation(
+    tmp_path: Path,
+) -> None:
+    signals: list[SignalSpec] = [("A", "uV", -100.0, 100.0, -100, 100, 4)]
+    records = [[np.arange(4, dtype=np.int16) + 4 * k] for k in range(4)]
+    path = make(
+        tmp_path,
+        signals=signals,
+        records=records,
+        flavor="EDF+D",
+        record_onsets=[0.37, 1.37, 5.37, 6.37],
+        annotations=[(0.5, None, "start")],
+    )
+    out = tmp_path / "x.zarr"
+    assert main([str(path), str(out)]) == 0
+    assert validate_bundle(out, full=True) == []
+
+
+def test_main_writes_the_annotations_without_a_channels_column(
+    tmp_path: Path,
+) -> None:
+    path = make(tmp_path, annotations=[(2.0, None, "wake")])
+    out = tmp_path / "x.zarr"
+    assert main([str(path), str(out)]) == 0
+    channel = open_bundle(out).events[2]
+    assert channel.read().channel_indices is None
+
+
+def test_main_follows_the_decimation_ladder_and_event_factor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ZARR_WRITER_CONTINUOUS_DECIMATION_FACTOR", "8,4")
+    monkeypatch.setenv("ZARR_WRITER_EVENT_DECIMATION_FACTOR", "3")
+    monkeypatch.setenv("ZARR_WRITER_MAX_LEVELS", "2")
+    monkeypatch.setenv("ZARR_WRITER_MIN_BINS", "1")
+    path = make(
+        tmp_path, n=64, annotations=[(2.0, None, "wake"), (4.0, None, "rem")]
+    )
+    out = tmp_path / "x.zarr"
+    assert main([str(path), str(out)]) == 0
+    assert validate_bundle(out, full=True) == []
+    levels = open_bundle(out).continuous[0].levels
+    assert [level.period_us for level in levels.values()] == [
+        8 * 250_000,
+        32 * 250_000,
+    ]
 
 
 def test_main_writes_the_code_and_sex_of_the_subject_by_default(
